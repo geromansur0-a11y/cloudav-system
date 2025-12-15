@@ -1,88 +1,90 @@
-import asyncio, watchdog.observers, watchdog.events, psutil, aiohttp, hashlib
-import platform, subprocess, time, json, zipfile
+#!/usr/bin/env python3
+import os
+import sys
+import time
+import hashlib
+import requests
 from pathlib import Path
-import pyaudio, wave  # Audio alerts
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+import platform
+
+API_URL = "https://your-app.railway.app"  # Ganti dengan URL deploy
 
 class CloudAVAgent:
-    def __init__(self, api_url="https://your-cloudav.railway.app"):
-        self.api_url = api_url
-        self.session = aiohttp.ClientSession()
-        self.api_key = "your-api-key-here"
+    def __init__(self):
         self.threats_blocked = 0
         self.system = platform.system()
-        
-    class StealthHandler(watchdog.events.FileSystemEventHandler):
-        def __init__(self, agent):
-            self.agent = agent
-            
-        def on_any_event(self, event):
-            if not event.is_directory and self.is_suspicious(event.src_path):
-                asyncio.create_task(self.agent.scan_and_quarantine(event.src_path))
-                
-        def is_suspicious(self, path):
-            suspicious_ext = {'.exe', '.scr', '.bat', '.vbs', '.js', '.jar', '.pdf', '.docx'}
-            return Path(path).suffix.lower() in suspicious_ext
-        
-    async def scan_and_quarantine(self, file_path):
+        print(f"🛡️ CloudAV Agent started on {self.system}")
+    
+    def compute_hash(self, file_path):
+        h = hashlib.sha256()
         try:
-            async with self.session.post(
-                f"{self.api_url}/api/scan",
-                data={'file': open(file_path, 'rb')},
-                headers={'Authorization': f"Bearer {self.api_key}"}
-            ) as resp:
-                result = await resp.json()
+            with open(file_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(4096), b''):
+                    h.update(chunk)
+            return h.hexdigest()
+        except:
+            return None
+    
+    def scan_file(self, file_path):
+        if os.path.getsize(file_path) > 10_000_000:  # Skip >10MB
+            return
+        
+        file_hash = self.compute_hash(file_path)
+        if not file_hash:
+            return
+        
+        try:
+            with open(file_path, 'rb') as f:
+                files = {'file': f}
+                resp = requests.post(f"{API_URL}/api/scan", files=files, timeout=10)
+                result = resp.json()
                 
-            if result['status'] == 'INFECTED':
-                self.quarantine(file_path)
-                self.play_alert()
-                print(f"🚨 THREAT BLOCKED: {file_path} - {result['threats']}")
-                self.threats_blocked += 1
-                
+                if result['status'] == 'INFECTED':
+                    self.quarantine(file_path)
+                    print(f"🛑 THREAT BLOCKED: {file_path} - {result['threats']}")
         except Exception as e:
-            print(f"Scan error: {e}")
+            print(f"❌ Scan failed: {e}")
     
     def quarantine(self, file_path):
-        quarantine_dir = Path.home() / ".cloudav-quarantine"
+        quarantine_dir = Path.home() / ".cloudav_quarantine"
         quarantine_dir.mkdir(exist_ok=True)
-        zip_path = quarantine_dir / f"{Path(file_path).name}.quarantine.zip"
-        
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            zf.write(file_path, Path(file_path).name)
-        Path(file_path).unlink()
-    
-    def play_alert(self):
-        # Simple beep alert
-        if self.system == "Windows":
-            subprocess.run(["powershell", "-c", "(New-Object Media.SoundPlayer).PlaySync()"])
-    
-    async def run_background(self):
-        handler = self.StealthHandler(self)
-        observer = watchdog.observers.Observer()
-        
-        paths = {
-            'Windows': ['C:\\Users', 'C:\\ProgramData'],
-            'Darwin': ['/Users', '/Applications'],
-            'Linux': ['/home', '/tmp']
-        }
-        
-        for path in paths.get(self.system, ['/']):
-            if Path(path).exists():
-                observer.schedule(handler, path, recursive=True)
-        
-        observer.start()
-        print(f"🛡️ CloudAV Agent active on {self.system}")
-        
-        try:
-            while True:
-                await asyncio.sleep(60)
-                print(f"Status: {self.threats_blocked} threats blocked")
-        finally:
-            observer.stop()
-            observer.join()
+        new_path = quarantine_dir / Path(file_path).name
+        Path(file_path).rename(new_path)
+        self.threats_blocked += 1
 
-async def main():
-    agent = CloudAVAgent()
-    await agent.run_background()
+class Handler(FileSystemEventHandler):
+    def __init__(self):
+        self.agent = CloudAVAgent()
+    
+    def on_created(self, event):
+        if not event.is_directory and not event.src_path.endswith(('.py', '.exe')):
+            print(f"🔍 Scanning: {event.src_path}")
+            self.agent.scan_file(event.src_path)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Monitor Downloads folder
+    paths = []
+    if platform.system() == "Windows":
+        paths = [os.path.expanduser("~/Downloads")]
+    else:
+        paths = [os.path.expanduser("~/Downloads"), "/tmp"]
+    
+    event_handler = Handler()
+    observer = Observer()
+    
+    for path in paths:
+        if os.path.exists(path):
+            observer.schedule(event_handler, path, recursive=False)
+    
+    observer.start()
+    print(f"👁️ Monitoring: {' | '.join(paths)}")
+    print("Press Ctrl+C to stop...")
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
