@@ -9,7 +9,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import platform
 
-API_URL = "https://your-app.railway.app"  # Ganti dengan URL deploy
+API_URL = "https://railway.com/project/ac58653f-04ff-428c-a8d1-a9d0eeb4f47e/service/4d84b0a4-75ef-4743-9ee8-5eafd0d4c4be?environmentId=98aaca92-d086-4fa4-9aea-5c2e636b1015"  # Ganti dengan URL deploy
 
 class CloudAVAgent:
     def __init__(self):
